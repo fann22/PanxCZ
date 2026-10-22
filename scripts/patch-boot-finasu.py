@@ -46,7 +46,9 @@ def header_from(template_hdr, name, payload, mode):
     """Reuse a real entry's header fields, patching only name/size."""
     h = bytearray(template_hdr)
     nm = name.encode() + b"\0"
-    struct.pack_into(">8s", h, 6, b"%08x" % mode)
+    # newc header: ino at 6, mode at 14.  Only the mode is ours to set; the
+    # inode number stays whatever the template entry had.
+    struct.pack_into(">8s", h, 14, b"%08x" % mode)
     struct.pack_into(">8s", h, 54, b"%08x" % len(payload))
     struct.pack_into(">8s", h, 94, b"%08x" % len(nm))
     return bytes(h)
