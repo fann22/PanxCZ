@@ -133,6 +133,7 @@ jobs:
           file target/aarch64-linux-android/release/ksuinit
           # The whole point of this build: the guard is loaded from the ramdisk.
           strings -a target/aarch64-linux-android/release/ksuinit | grep -q '/susfs_guard_lkm.ko'
+          strings -a target/aarch64-linux-android/release/ksuinit | grep -q 'expose_proc=1'
 
       - name: Stage
         run: |
@@ -203,6 +204,7 @@ jobs:
           fi
 
           strings -a in/ksuinit | grep -q '/susfs_guard_lkm.ko'
+          strings -a in/ksuinit | grep -q 'expose_proc=1'
           strings -a in/kernelsu.ko | grep -q 'FinaSU'
 
       - name: Assemble the payload
