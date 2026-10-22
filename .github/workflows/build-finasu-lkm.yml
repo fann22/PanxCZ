@@ -1,0 +1,233 @@
+name: Build FinaSU LKM (android12-5.10)
+
+# Builds the LKM-mode root solution this device runs:
+#   * kernelsu.ko  - FinaSU's kernel module, built for KMI android12-5.10
+#                    against the same DDK the project's CI uses, with
+#                    FinaSU's release manager certificate trusted.
+#   * ksuinit      - FinaSU's ramdisk init shim, patched to also load
+#                    /susfs_guard_lkm.ko from the ramdisk.
+#   * susfs_guard_lkm.ko - the SUSFS 2.3.0 kernel-side guard LKM for the KMI.
+#
+# The output is a boot-ramdisk payload, not a kernel image: this device already
+# boots a stock GKI kernel whose ramdisk loads kernelsu.ko as a module.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [lkm-finasu]
+
+env:
+  FINASU_REPO: https://github.com/LyraVoid/FinaSU.git
+  # Pinned: this is the revision whose ksud answers the SUSFS 2.3.0 GKI-LKM
+  # ABI, which is what the guard module below speaks.
+  FINASU_REF: ef67206b82253b8006f686c5938d02f10c012f1c
+  KMI: android12-5.10
+  DDK_RELEASE: "20260828"
+  # FinaSU v1.0.7 release APK signing certificate, as KernelSU hashes it
+  # (DER bytes in the APK Signature Scheme v2 block).
+  MANAGER_CERT_SIZE: "0x2cc"
+  MANAGER_CERT_SHA256: "2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
+  SUSFS_LKM_TAG: v2.3.0-r18.4
+
+jobs:
+  kernelsu:
+    name: kernelsu.ko (${{ github.event.repository.name }} / android12-5.10)
+    runs-on: ubuntu-22.04
+    container:
+      image: ghcr.io/ylarod/ddk-min:android12-5.10-20260828
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone FinaSU at the pinned revision
+        run: |
+          git config --global --add safe.directory '*'
+          git clone --quiet "$FINASU_REPO" finasu
+          git -C finasu checkout --quiet "$FINASU_REF"
+          git -C finasu log -1 --format='%H %s'
+
+      - name: Build kernelsu.ko
+        working-directory: finasu/kernel
+        run: |
+          set -euo pipefail
+          echo "KDIR=$KDIR"
+          make clean >/dev/null 2>&1 || true
+          CONFIG_KSU=m CC=clang make -j"$(nproc)" \
+            KSU_REQUIRE_PREINIT=1 \
+            KSU_EXPECTED_SIZE2="$MANAGER_CERT_SIZE" \
+            KSU_EXPECTED_HASH2="$MANAGER_CERT_SHA256" \
+            KSU_SECOND_SIGNATURE_RELEASE=1
+          ls -la kernelsu.ko
+          test -s kernelsu.ko
+
+      - name: Inspect the module
+        working-directory: finasu/kernel
+        run: |
+          set -euo pipefail
+          readelf -h kernelsu.ko | grep -E 'Class|Machine|Type'
+          readelf -h kernelsu.ko | grep -q 'AArch64'
+          modinfo kernelsu.ko
+          test "$(modinfo -F name kernelsu.ko)" = kernelsu
+          case "$(modinfo -F vermagic kernelsu.ko)" in
+              5.10.*) ;;
+              *) echo "unexpected vermagic: $(modinfo -F vermagic kernelsu.ko)"; exit 1 ;;
+          esac
+          modinfo -F parm kernelsu.ko | grep -q preinit
+          echo "undefined symbols: $(nm -u kernelsu.ko | wc -l)"
+
+      - name: Strip debug symbols and stage
+        working-directory: finasu/kernel
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          llvm-strip -d kernelsu.ko
+          cp kernelsu.ko "$GITHUB_WORKSPACE/out/kernelsu.ko"
+          sha256sum "$GITHUB_WORKSPACE/out/kernelsu.ko"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernelsu-ko
+          path: out/kernelsu.ko
+          if-no-files-found: error
+
+  ksuinit:
+    name: ksuinit (aarch64, loads the SUSFS guard)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone FinaSU and apply the guard-loading change
+        run: |
+          git clone --quiet "$FINASU_REPO" finasu
+          git -C finasu checkout --quiet "$FINASU_REF"
+          git -C finasu apply --verbose "$GITHUB_WORKSPACE/lkm/patches/ksuinit-load-susfs-guard.patch"
+          git -C finasu diff --stat
+
+      - name: Setup Rust
+        run: |
+          rustup update stable
+          rustup target add aarch64-linux-android
+
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: finasu -> target
+          cache-targets: false
+
+      - name: Build ksuinit
+        working-directory: finasu
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/setup-rust-build.sh aarch64-linux-android 26
+          BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
+          test -f "$BUILTINS"
+          export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
+          cargo build --package ksuinit --target=aarch64-linux-android --release
+          ls -la target/aarch64-linux-android/release/ksuinit
+          file target/aarch64-linux-android/release/ksuinit
+          # The whole point of this build: the guard is loaded from the ramdisk.
+          strings -a target/aarch64-linux-android/release/ksuinit | grep -q '/susfs_guard_lkm.ko'
+
+      - name: Stage
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp finasu/target/aarch64-linux-android/release/ksuinit out/ksuinit
+          sha256sum out/ksuinit
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ksuinit
+          path: out/ksuinit
+          if-no-files-found: error
+
+  package:
+    name: assemble ramdisk payload
+    runs-on: ubuntu-22.04
+    needs: [kernelsu, ksuinit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: in
+          merge-multiple: true
+
+      - name: Fetch the SUSFS guard LKM
+        run: |
+          set -euo pipefail
+          base="https://github.com/inforcqb/susfs4ksu-lkm/releases/download/$SUSFS_LKM_TAG"
+          curl -sSL -o in/susfs_guard_lkm.ko \
+            "$base/susfs_guard_lkm-${KMI}.ko"
+          curl -sSL -o /tmp/module.zip \
+            "$base/susfs_guard_lkm-module-$SUSFS_LKM_TAG-arm64.zip"
+          unzip -l /tmp/module.zip | head -5
+
+      - name: Verify every piece before it is packaged
+        run: |
+          set -euo pipefail
+          readelf -h in/kernelsu.ko | grep -q AArch64
+          readelf -h in/susfs_guard_lkm.ko | grep -q AArch64
+          readelf -h in/ksuinit | grep -q AArch64
+          if readelf -l in/ksuinit | grep -q INTERP; then
+            echo "ksuinit must be statically linked"; exit 1
+          fi
+
+          modinfo in/kernelsu.ko
+          test "$(modinfo -F name in/kernelsu.ko)" = kernelsu
+          case "$(modinfo -F vermagic in/kernelsu.ko)" in
+              5.10.*) ;;
+              *) echo "unexpected kernelsu.ko vermagic"; exit 1 ;;
+          esac
+          modinfo -F license in/kernelsu.ko | grep -q GPL
+
+          modinfo in/susfs_guard_lkm.ko
+          test "$(modinfo -F name in/susfs_guard_lkm.ko)" = susfs_guard_lkm
+          case "$(modinfo -F vermagic in/susfs_guard_lkm.ko)" in
+              5.10.*) ;;
+              *) echo "unexpected guard vermagic"; exit 1 ;;
+          esac
+          modinfo -F description in/susfs_guard_lkm.ko | grep -q 'v2\.3\.0'
+
+          test "$(nm -u in/susfs_guard_lkm.ko | wc -l)" -gt 0
+          # The guard must not hard-depend on ksu_* symbols: it is loaded after
+          # kernelsu.ko but must not require this particular build of it.
+          if nm -u in/susfs_guard_lkm.ko | grep -qw ksu_init; then
+            echo "guard unexpectedly depends on ksu_init"; exit 1
+          fi
+
+          strings -a in/ksuinit | grep -q '/susfs_guard_lkm.ko'
+          strings -a in/kernelsu.ko | grep -q 'FinaSU'
+
+      - name: Assemble the payload
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          cp in/kernelsu.ko in/susfs_guard_lkm.ko in/ksuinit payload/
+          {
+            echo "component: FinaSU LKM (android12-5.10, KMI generation 9)"
+            echo "finasu_ref: $FINASU_REF"
+            echo "finasu_manager_cert_sha256: $MANAGER_CERT_SHA256"
+            echo "finasu_manager_cert_size: $MANAGER_CERT_SIZE"
+            echo "susfs_lkm: $SUSFS_LKM_TAG"
+            echo "kmi: $KMI"
+            echo "ddk_release: $DDK_RELEASE"
+            echo "kernel_target: 5.10.x GKI (android12-5.10), aarch64"
+            echo "built_from_commit: ${GITHUB_SHA}"
+            echo "built_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > payload/BUILD-INFO.txt
+          ( cd payload && sha256sum kernelsu.ko susfs_guard_lkm.ko ksuinit > SHA256SUMS )
+          cat payload/SHA256SUMS
+          ( cd payload && ls -la )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finasu-lkm-android12-5.10
+          path: payload/
+          if-no-files-found: error

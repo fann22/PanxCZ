@@ -1,0 +1,46 @@
+diff --git a/userspace/ksuinit/src/init.rs b/userspace/ksuinit/src/init.rs
+index 92868b3..895240b 100644
+--- a/userspace/ksuinit/src/init.rs
++++ b/userspace/ksuinit/src/init.rs
+@@ -4,6 +4,7 @@ use std::io::{ErrorKind, Write};
+ use anyhow::{Context, Result};
+ use rustix::fs::{Mode, symlink, unlink};
+ use rustix::{
++    cstr,
+     fd::AsFd,
+     fs::{Access, CWD, FileType, access, makedev, mkdir, mknodat},
+     mount::{
+@@ -112,6 +113,14 @@ pub fn init() -> Result<()> {
+         }
+     }
+ 
++    // The SUSFS guard LKM lives beside kernelsu.ko in the boot ramdisk.  It has
++    // its own module ABI and takes no KernelSU parameters, so it is loaded here
++    // rather than through /ksu_config: once Android's init starts, the guard has
++    // to be in place for the paths it hides to stay hidden from the first scan.
++    if let Err(e) = load_optional_module("/susfs_guard_lkm.ko") {
++        log::error!("Cannot load susfs_guard_lkm.ko: {:?}", e);
++    }
++
+     // And now we should prepare the real init to transfer control to it
+     unlink("/init")?;
+ 
+@@ -126,6 +135,18 @@ pub fn init() -> Result<()> {
+     Ok(())
+ }
+ 
++/// Loads a module shipped in the ramdisk with an empty parameter string, and
++/// does nothing when the file is absent.
++fn load_optional_module(path: &str) -> Result<()> {
++    if access(path, Access::EXISTS).is_err() {
++        return Ok(());
++    }
++    anyhow::ensure!(rustix::process::getpid().is_init(), "Invalid process");
++    let buffer = std::fs::read(path).with_context(|| format!("Cannot read file {path}"))?;
++    log::info!("Loading {path}..");
++    ksuinit::load_module(&buffer, cstr!(""))
++}
++
+ fn load_module_from_path(path: &str) -> Result<()> {
+     anyhow::ensure!(rustix::process::getpid().is_init(), "Invalid process");
+     let buffer = std::fs::read(path).with_context(|| format!("Cannot read file {}", path))?;
