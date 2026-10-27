@@ -464,7 +464,27 @@ if [ "${VARIANT}" != "B-susfs-hiding" ]; then
     warn "BBRv3 Kconfig entry not found - base default congestion control kept"
   fi
 fi
-tail -30 "${DEFCONFIG}"
+# Chihiro's gki_defconfig ships PID_NS, USER_NS, IPC_NS and the devices cgroup
+# disabled (SUSFS/BakaSU builds usually drop these to shrink what an
+# unprivileged sandbox escape could reach). We need them for proper container
+# support (Docker/runc, proot-distro --isolated, etc) under root - appended
+# last so these lines win over the "is not set" ones already in the file.
+printf '%s\n' \
+  "" \
+  "# ---- PanxCZ: namespaces + devices cgroup (container support) ----" \
+  "CONFIG_NAMESPACES=y" \
+  "CONFIG_PID_NS=y" \
+  "CONFIG_USER_NS=y" \
+  "CONFIG_IPC_NS=y" \
+  "CONFIG_UTS_NS=y" \
+  "CONFIG_NET_NS=y" \
+  "CONFIG_CGROUPS=y" \
+  "CONFIG_CGROUP_DEVICE=y" \
+  "CONFIG_CGROUP_FREEZER=y" \
+  "CONFIG_CGROUP_PIDS=y" \
+  >> "${DEFCONFIG}"
+echo "OK: namespaces + devices cgroup appended"
+tail -40 "${DEFCONFIG}"
 
 # ---------------------------------------------------------------- 11. build
 log "Step 11/12 - build (LTO=${LTO_MODE}, jobs=$(nproc), CLEAN_OUT=${CLEAN_OUT})"
@@ -517,6 +537,7 @@ CFG_FAIL=""
 CFG_WANT=""
 [ "${ROOT_KSU}" = "no" ] || CFG_WANT="${CFG_WANT} CONFIG_KSU"
 [ "${SUSFS}" = "no" ] || CFG_WANT="${CFG_WANT} CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT"
+CFG_WANT="${CFG_WANT} CONFIG_PID_NS CONFIG_USER_NS CONFIG_IPC_NS CONFIG_NET_NS CONFIG_CGROUP_DEVICE CONFIG_CGROUP_PIDS"
 for sym in ${CFG_WANT}; do
   if grep -q "^${sym}=y" "${OCFG}" 2>/dev/null; then
     echo "OK: ${sym}=y in .config"
@@ -550,8 +571,11 @@ if [ -f "${REFCFG}" ] && command -v python3 >/dev/null 2>&1; then
     # skipped - the version banner always differs.
     # `^[<>] #` drops comment banners, `^[<>] *$` drops the blank separator
     # lines that come with the extra KernelSU/SUSFS config sections.
+    # CONFIG_PID_NS/USER_NS/IPC_NS/CGROUP_DEVICE/CGROUP_PIDS are deliberate
+    # PanxCZ additions (container support), not drift - see step 10.
     DRIFT="$(diff <(sort "${REFCFG}") <(sort "${ACTUAL}") | grep -E '^[<>]' \
              | grep -vE '^[<>] (CONFIG_KSU|# CONFIG_KSU|CONFIG_UNUSED_KSYMS_WHITELIST)' \
+             | grep -vE '^[<>] #? ?CONFIG_(PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS)([= ]|$)' \
              | grep -vE '^[<>] #' | grep -vE '^[<>][[:space:]]*$' || true)"
     if [ -z "${DRIFT}" ]; then
       echo "OK: config matches the known-good device kernel (modulo KSU/SUSFS)"
