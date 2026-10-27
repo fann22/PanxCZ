@@ -113,7 +113,7 @@ jobs:
           BASE_REPO: https://github.com/MillenniumOSS/android_kernel_common_millennium_android12-5.10.git
           # Pinned to the exact commit the device's current kernel was built from
           # (Oct 3 2026, 5.10.269). The branch tip has moved on to 5.10.272.
-          BASE_BRANCH: tree/2a6271bf1f5b68356b0ceba882512f09b1910cf6
+          BASE_BRANCH: 2a6271bf1f5b68356b0ceba882512f09b1910cf6
           # Root runs as a KernelSU LKM on this device and the stock kernel has
           # no hiding, so this build adds neither - it is the stock kernel plus
           # the container-support options appended in step 10 of the script.
