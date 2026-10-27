@@ -469,12 +469,16 @@ fi
 # unprivileged sandbox escape could reach). We need them for proper container
 # support (Docker/runc, proot-distro --isolated, etc) under root - appended
 # last so these lines win over the "is not set" ones already in the file.
+# IPC_NS depends on SYSVIPC || POSIX_MQUEUE and the base has both off, so
+# POSIX_MQUEUE (the smaller struct footprint) is enabled to keep IPC_NS from
+# being dropped silently. xt_addrtype is what Docker's default bridge uses.
 printf '%s\n' \
   "" \
   "# ---- PanxCZ: namespaces + devices cgroup (container support) ----" \
   "CONFIG_NAMESPACES=y" \
   "CONFIG_PID_NS=y" \
   "CONFIG_USER_NS=y" \
+  "CONFIG_POSIX_MQUEUE=y" \
   "CONFIG_IPC_NS=y" \
   "CONFIG_UTS_NS=y" \
   "CONFIG_NET_NS=y" \
@@ -482,6 +486,7 @@ printf '%s\n' \
   "CONFIG_CGROUP_DEVICE=y" \
   "CONFIG_CGROUP_FREEZER=y" \
   "CONFIG_CGROUP_PIDS=y" \
+  "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" \
   >> "${DEFCONFIG}"
 echo "OK: namespaces + devices cgroup appended"
 tail -40 "${DEFCONFIG}"
@@ -537,7 +542,7 @@ CFG_FAIL=""
 CFG_WANT=""
 [ "${ROOT_KSU}" = "no" ] || CFG_WANT="${CFG_WANT} CONFIG_KSU"
 [ "${SUSFS}" = "no" ] || CFG_WANT="${CFG_WANT} CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT"
-CFG_WANT="${CFG_WANT} CONFIG_PID_NS CONFIG_USER_NS CONFIG_IPC_NS CONFIG_NET_NS CONFIG_CGROUP_DEVICE CONFIG_CGROUP_PIDS"
+CFG_WANT="${CFG_WANT} CONFIG_PID_NS CONFIG_USER_NS CONFIG_IPC_NS CONFIG_NET_NS CONFIG_CGROUP_DEVICE CONFIG_CGROUP_PIDS CONFIG_POSIX_MQUEUE CONFIG_NETFILTER_XT_MATCH_ADDRTYPE"
 for sym in ${CFG_WANT}; do
   if grep -q "^${sym}=y" "${OCFG}" 2>/dev/null; then
     echo "OK: ${sym}=y in .config"
@@ -575,7 +580,7 @@ if [ -f "${REFCFG}" ] && command -v python3 >/dev/null 2>&1; then
     # PanxCZ additions (container support), not drift - see step 10.
     DRIFT="$(diff <(sort "${REFCFG}") <(sort "${ACTUAL}") | grep -E '^[<>]' \
              | grep -vE '^[<>] (CONFIG_KSU|# CONFIG_KSU|CONFIG_UNUSED_KSYMS_WHITELIST)' \
-             | grep -vE '^[<>] #? ?CONFIG_(PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS)([= ]|$)' \
+             | grep -vE '^[<>] #? ?CONFIG_(PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS|POSIX_MQUEUE|NETFILTER_XT_MATCH_ADDRTYPE)([= ]|$)' \
              | grep -vE '^[<>] #' | grep -vE '^[<>][[:space:]]*$' || true)"
     if [ -z "${DRIFT}" ]; then
       echo "OK: config matches the known-good device kernel (modulo KSU/SUSFS)"

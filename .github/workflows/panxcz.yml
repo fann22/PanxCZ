@@ -103,7 +103,7 @@ jobs:
 
       - name: Build
         env:
-          VARIANT: ${{ inputs.variant || 'A-full-allin' }}
+          VARIANT: ${{ inputs.variant || 'B-susfs-hiding' }}
           KERNEL_RELEASE: ${{ inputs.kernel_release || '4.0' }}
           LTO_MODE: ${{ inputs.lto || 'thin' }}
           BBRV3: ${{ inputs.bbrv3 || 'no' }}
@@ -111,7 +111,14 @@ jobs:
           # Pin the live tree explicitly so a stale runner cache or a changed
           # script default can never silently fall back to the legacy repo.
           BASE_REPO: https://github.com/MillenniumOSS/android_kernel_common_millennium_android12-5.10.git
-          BASE_BRANCH: chihiro-main
+          # Pinned to the exact commit the device's current kernel was built from
+          # (Oct 3 2026, 5.10.269). The branch tip has moved on to 5.10.272.
+          BASE_BRANCH: 2a6271bf1f5b68356b0ceba882512f09b1910cf6
+          # Root runs as a KernelSU LKM on this device and the stock kernel has
+          # no hiding, so this build adds neither - it is the stock kernel plus
+          # the container-support options appended in step 10 of the script.
+          ROOT_KSU: 'no'
+          SUSFS: 'no'
           WORKDIR: /opt/panxcz
         run: |
           set -euo pipefail
@@ -119,14 +126,13 @@ jobs:
           sudo -E bash scripts/build-panxcz.sh
           echo "--- verification (must not be empty) ---"
           O=/opt/panxcz/gki/out/android12-5.10/common
-          probes="susfs"
-          [ "${BBRV3}" = "no" ] || probes="bbr3 susfs"
-          for p in $probes; do
-            n=$(grep -ic "$p" "$O/System.map" || true)
-            echo "$p symbols: $n"
-            [ "$n" -gt 0 ] || { echo "::error::$p missing from System.map"; exit 1; }
+          # What this build is for: the container-support options must have
+          # survived olddefconfig (a symbol with unmet dependencies is dropped
+          # silently, e.g. IPC_NS without SYSVIPC/POSIX_MQUEUE).
+          for c in PID_NS USER_NS IPC_NS CGROUP_DEVICE POSIX_MQUEUE NETFILTER_XT_MATCH_ADDRTYPE; do
+            grep -q "^CONFIG_${c}=y" "$O/.config" || { echo "::error::CONFIG_${c} missing from .config"; exit 1; }
+            echo "CONFIG_${c}=y"
           done
-          grep -q '^CONFIG_KSU_SUSFS=y' "$O/.config"
           # The base must be 5.10.269 from chihiro-main, not a merged legacy tree.
           echo -n "base LTS level: "
           awk '/^(VERSION|PATCHLEVEL|SUBLEVEL) =/{printf "%s.",$3}END{print ""}' \
@@ -166,7 +172,9 @@ jobs:
             Base: MillenniumOSS Chihiro **`millennium/chihiro-main`**
             @ `2a6271bf1f5b` → **5.10.269**, KMI generation 9. No AOSP LTS merge
             (the hand-merged legacy tree bootlooped v10/v11).
-            Root: BakaSU (multi-manager) · Hiding: SUSFS.
+            No built-in root or hiding (KernelSU runs as an LKM on this device).
+            Adds container support: PID/USER/IPC namespaces, devices cgroup,
+            POSIX mqueue, xt_addrtype.
 
             Credit: kernel work belongs to MillenniumOSS (Chihiro), Aetherium
             (kaminarich), BakaSU, SUSFS and upstream Linux/AOSP. PanxCZ is a
