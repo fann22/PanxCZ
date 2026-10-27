@@ -200,27 +200,36 @@ echo "OK: build tooling + prebuilts present"
 # downloading blobs lazily; the working tree is still complete after checkout.
 log "Step 4/12 - swap common/ with ${BASE_NAME}"
 cd "${COMMON}"
-# LTS_MERGE=yes (default) targets the locally built 5.10.269 base and creates it
-# on demand, so a fresh machine - including GitHub Actions - reproduces the
-# exact same base instead of needing a multi-GB branch push.
-if [ "${LTS_MERGE}" = "yes" ]; then
-  BASE_BRANCH="${LTS_BASE_BRANCH}"
-  if ! git rev-parse --verify --quiet "refs/heads/${BASE_BRANCH}" >/dev/null; then
-    log "Step 4a/12 - build the ${BASE_BRANCH} base (${LTS_SOURCE_BRANCH} + AOSP LTS)"
-    bash "${SCRIPT_DIR}/make-base-269.sh" "$PWD" \
-      || die "failed to create the ${BASE_BRANCH} base"
-  fi
-fi
-# A locally built base takes precedence over any remote.
-if git rev-parse --verify --quiet "refs/heads/${BASE_BRANCH}" >/dev/null || \
-   git rev-parse --verify --quiet "${BASE_BRANCH}" >/dev/null; then
-  echo "OK: using local base ref '${BASE_BRANCH}'"
-  git checkout -f "${BASE_BRANCH}"
+
+# Ensure the base remote exists and points to the correct repository.
+if git remote | grep -qx "$BASE_NAME"; then
+    git remote set-url "$BASE_NAME" "$BASE_REPO"
 else
-  if git remote | grep -qx "$BASE_NAME"; then git remote set-url "$BASE_NAME" "${BASE_REPO}"; else git remote add "$BASE_NAME" "${BASE_REPO}"; fi
-  git fetch --filter=blob:none "$BASE_NAME" "${BASE_BRANCH}"
-  git checkout -f FETCH_HEAD
+    git remote add "$BASE_NAME" "$BASE_REPO"
 fi
+
+# First, try fetching the requested branch or commit.
+log "Fetching base ref: ${BASE_BRANCH}"
+
+git fetch --no-tags --filter=blob:none "$BASE_NAME" "$BASE_BRANCH" || true
+
+# A resolvable commit is not enough; its tree must also be available.
+if ! git cat-file -e "${BASE_BRANCH}^{tree}" 2>/dev/null; then
+    log "Base tree missing; fetching remote branches"
+
+    git fetch --no-tags --filter=blob:none "$BASE_NAME" \
+        '+refs/heads/*:refs/remotes/'"${BASE_NAME}"'/*' \
+        || die "Failed to fetch branches from ${BASE_REPO}"
+fi
+
+# Verify the actual commit tree before checking it out.
+if ! git cat-file -e "${BASE_BRANCH}^{tree}" 2>/dev/null; then
+    die "Base commit/tree unavailable: ${BASE_BRANCH}"
+fi
+
+git checkout -f "${BASE_BRANCH}" \
+    || die "Failed to checkout base ref: ${BASE_BRANCH}"
+
 git checkout -B panxcz-build
 git clean -fdx
 echo -n "base LTS level: "; awk '/^(VERSION|PATCHLEVEL|SUBLEVEL) =/{printf "%s.",$3}END{print ""}' Makefile
