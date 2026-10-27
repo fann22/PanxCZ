@@ -43,13 +43,17 @@ on:
         required: true
         default: 'no'
         type: choice
-        options: [yes, auto, no]
+        # Unquoted yes/no are YAML 1.1 booleans, so the dropdown silently became
+        # [true, auto, false] and the script's string compares (`= "no"`)
+        # could never match - quoting keeps these as the literal strings the
+        # build script actually tests against.
+        options: ['yes', 'auto', 'no']
       lts_merge:
         description: 'LEGACY ONLY: merge AOSP LTS onto the old repo (leave `no`)'
         required: true
         default: 'no'
         type: choice
-        options: [no, yes]
+        options: ['no', 'yes']
       publish_release:
         description: 'Publish a GitHub release with the artifacts'
         required: true
